@@ -11,6 +11,9 @@ import plotly.graph_objects as go
 from datetime import date, timedelta
 import math
 import time
+import numpy as np
+from scipy.stats import norm, probplot, jarque_bera
+import plotly.express as px
 
 # -- Page configuration ----------------------------------
 # st.set_page_config must be the FIRST Streamlit command in the script.
@@ -112,6 +115,38 @@ def compute_price_return_analysis(prices: pd.DataFrame, user_tickers: list[str])
 
     return returns, stats, wealth
 
+
+@st.cache_data(show_spinner="Calculating risk and distribution analysis...", ttl=3600)
+def compute_risk_distribution_analysis(returns: pd.DataFrame, selected_stock: str, window: int):
+    rolling_vol = returns.rolling(window=window).std() * math.sqrt(252)
+
+    stock_returns = returns[selected_stock].dropna()
+
+    mu, sigma = norm.fit(stock_returns)
+    x_vals = np.linspace(stock_returns.min(), stock_returns.max(), 200)
+    pdf_vals = norm.pdf(x_vals, mu, sigma)
+
+    qq = probplot(stock_returns, dist="norm")
+    theoretical_q = qq[0][0]
+    sample_q = qq[0][1]
+    slope = qq[1][0]
+    intercept = qq[1][1]
+
+    jb_stat, jb_p = jarque_bera(stock_returns)
+
+    return (
+        rolling_vol,
+        stock_returns,
+        x_vals,
+        pdf_vals,
+        theoretical_q,
+        sample_q,
+        slope,
+        intercept,
+        jb_stat,
+        jb_p,
+    )
+
 # -- Main logic -------------------------------------------
 if run_analysis and tickers:
     try:
@@ -154,10 +189,11 @@ if run_analysis and tickers:
         st.info("Data was truncated to the overlapping date range across tickers.")
 
     usable_tickers = [t for t in tickers if t in prices.columns]
-    returns, stats_df, wealth_df = compute_price_return_analysis(prices, usable_tickers)
     if len(usable_tickers) < 2:
         st.error("At least 2 valid stock tickers with sufficient data are required.")
         st.stop()
+
+    returns, stats_df, wealth_df = compute_price_return_analysis(prices, usable_tickers)
 
 
     tab1, tab2, tab3, tab4 = st.tabs(
