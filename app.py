@@ -121,8 +121,20 @@ def load_data(tickers: list[str], start: date, end: date):
                     threads=False
                 )
 
-                if not df.empty and "Adj Close" in df.columns:
-                    data[symbol] = df["Adj Close"]
+                if not df.empty:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+
+                if "Adj Close" in df.columns:
+                    adj_close = df["Adj Close"]
+
+                    if isinstance(adj_close, pd.DataFrame):
+                        adj_close = adj_close.iloc[:, 0]
+
+                    adj_close = adj_close.copy()
+                    adj_close.name = symbol
+
+                    data[symbol] = adj_close
                     success = True
                     time.sleep(0.25)
                     break
@@ -291,10 +303,12 @@ if st.session_state.analysis_started and tickers:
     if not data_dict:
         st.stop()
 
-    # ✅ CLEAN DATA (cached)
+    # CLEAN DATA (cached)
     prices, drop_cols, rows_before, rows_after = clean_price_data(data_dict)
+    if prices.empty:
+        st.error("No usable price data remained after cleaning. Please try different tickers.")
+        st.stop()
 
-    # ✅ NOW SAFE to use drop_cols
     if drop_cols:
         st.warning(
             "Dropped ticker(s) with more than 5% missing values: "
@@ -311,7 +325,7 @@ if st.session_state.analysis_started and tickers:
 
     returns, stats_df, wealth_df = compute_price_return_analysis(prices, usable_tickers)
 
-    # ✅ ALL YOUR TABS MUST ALSO BE INSIDE THIS BLOCK
+    # ALL TABS MUST ALSO BE INSIDE THIS BLOCK
     tab1, tab2, tab3, tab4 = st.tabs(
         ["Price & Returns", "Risk & Distribution", "Correlation & Portfolio", "About"]
     )
@@ -423,10 +437,7 @@ if st.session_state.analysis_started and tickers:
             st.warning("Select at least one series for the rolling volatility chart.")
             st.stop()
 
-        if not vol_series:
-            st.warning("Select at least one series for the rolling volatility chart.")
-        else:
-            rolling_vol, stock_returns, x_vals, pdf_vals, theoretical_q, sample_q, slope, intercept, jb_stat, jb_p = compute_risk_distribution_analysis(
+        rolling_vol, stock_returns, x_vals, pdf_vals, theoretical_q, sample_q, slope, intercept, jb_stat, jb_p = compute_risk_distribution_analysis(
             returns, dist_stock, vol_window
         )
 
@@ -497,8 +508,8 @@ if st.session_state.analysis_started and tickers:
             st.markdown(f"### Q-Q Plot: {dist_stock}")
 
             st.caption(
-            "Points close to the reference line suggest returns are closer to normal; "
-            "large deviations (especially in the tails) indicate non-normality."
+                "Points close to the reference line suggest returns are closer to normal; "
+                "large deviations (especially in the tails) indicate non-normality."
             )
 
             qq_fig = go.Figure()
