@@ -42,6 +42,12 @@ start_date = st.sidebar.date_input("Start Date", value=default_start, min_value=
 end_date = st.sidebar.date_input("End Date", value=date.today(), min_value=date(1970, 1, 1))
 run_analysis = st.sidebar.button("Run Analysis")
 
+if "analysis_started" not in st.session_state:
+    st.session_state.analysis_started = False
+
+if run_analysis:
+    st.session_state.analysis_started = True
+
 # Validate that the date range makes sense
 if start_date >= end_date:
     st.sidebar.error("Start date must be before end date.")
@@ -148,7 +154,7 @@ def compute_risk_distribution_analysis(returns: pd.DataFrame, selected_stock: st
     )
 
 # -- Main logic -------------------------------------------
-if run_analysis and tickers:
+if st.session_state.analysis_started and tickers:
     try:
         data_dict, failed_tickers = load_data(tickers, start_date, end_date)
     except Exception as e:
