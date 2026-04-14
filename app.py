@@ -89,6 +89,10 @@ if tickers:
             "These ticker(s) failed to download or had insufficient data: "
             + ", ".join(failed_tickers)
         )
+        st.warning(
+            "Yahoo Finance may be rate-limiting requests right now. "
+            "This can happen on Streamlit Cloud when many apps share the same outbound IP."
+        )
 
     if not data_dict:
         st.stop()
