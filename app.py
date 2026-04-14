@@ -14,6 +14,7 @@ import time
 import numpy as np
 from scipy.stats import norm, probplot, jarque_bera
 import plotly.express as px
+import re
 
 # -- Page configuration ----------------------------------
 # st.set_page_config must be the FIRST Streamlit command in the script.
@@ -30,8 +31,31 @@ ticker_text = st.sidebar.text_input(
 )
 
 tickers = [t.strip().upper() for t in ticker_text.split(",") if t.strip()]
-tickers = list(dict.fromkeys(tickers))  # remove duplicates, keep order
+tickers = list(dict.fromkeys(tickers))
 
+# Detect likely missing commas
+if " " in ticker_text and "," not in ticker_text:
+    st.sidebar.warning(
+        "It looks like you entered multiple tickers without commas.\n\n"
+        "Please separate tickers with commas (e.g., AAPL, MSFT, TSLA)."
+    )
+    st.stop()
+
+# Detect invalid ticker formats
+invalid_format_tickers = [
+    t for t in tickers
+    if not re.fullmatch(r"^[A-Z.\-^=]{1,10}$", t)
+]
+
+if invalid_format_tickers:
+    st.sidebar.error(
+        "These ticker inputs look invalid: "
+        + ", ".join(invalid_format_tickers)
+        + "\n\nUse valid tickers like AAPL, MSFT, TSLA."
+    )
+    st.stop()
+
+# Validate number of tickers
 if len(tickers) < 2 or len(tickers) > 5:
     st.sidebar.error("Please enter between 2 and 5 ticker symbols.")
     st.stop()
@@ -45,8 +69,22 @@ run_analysis = st.sidebar.button("Run Analysis")
 if "analysis_started" not in st.session_state:
     st.session_state.analysis_started = False
 
+current_inputs = {
+    "tickers": tuple(tickers),
+    "start_date": start_date,
+    "end_date": end_date,
+}
+
+if "last_inputs" not in st.session_state:
+    st.session_state.last_inputs = current_inputs
+
+if current_inputs != st.session_state.last_inputs:
+    st.session_state.analysis_started = False
+    st.session_state.last_inputs = current_inputs
+
 if run_analysis:
     st.session_state.analysis_started = True
+    st.session_state.last_inputs = current_inputs
 
 # Validate that the date range makes sense
 if start_date >= end_date:
@@ -86,7 +124,7 @@ def load_data(tickers: list[str], start: date, end: date):
                 if not df.empty and "Adj Close" in df.columns:
                     data[symbol] = df["Adj Close"]
                     success = True
-                    time.sleep(1)
+                    time.sleep(0.25)
                     break
 
             except Exception:
@@ -153,6 +191,86 @@ def compute_risk_distribution_analysis(returns: pd.DataFrame, selected_stock: st
         jb_p,
     )
 
+@st.cache_data(show_spinner="Calculating correlation and portfolio analysis...", ttl=3600)
+def compute_correlation_portfolio_analysis(
+    returns: pd.DataFrame,
+    stock_a: str,
+    stock_b: str,
+    corr_window: int,
+    weight_a_pct: int,
+):
+    selected_returns = returns[[stock_a, stock_b]].dropna()
+
+    corr_matrix = returns.corr()
+
+    rolling_corr = selected_returns[stock_a].rolling(corr_window).corr(selected_returns[stock_b])
+
+    weight_a = weight_a_pct / 100
+    weight_b = 1 - weight_a
+
+    ann_returns = selected_returns.mean() * 252
+    ann_cov = selected_returns.cov() * 252
+
+    current_portfolio_return = weight_a * ann_returns[stock_a] + weight_b * ann_returns[stock_b]
+
+    current_portfolio_var = (
+        (weight_a ** 2) * ann_cov.loc[stock_a, stock_a]
+        + (weight_b ** 2) * ann_cov.loc[stock_b, stock_b]
+        + 2 * weight_a * weight_b * ann_cov.loc[stock_a, stock_b]
+    )
+    current_portfolio_vol = math.sqrt(current_portfolio_var)
+
+    weight_grid = np.arange(0, 101)
+    vol_curve = []
+    ret_curve = []
+
+    for w_pct in weight_grid:
+        w_a = w_pct / 100
+        w_b = 1 - w_a
+
+        p_ret = w_a * ann_returns[stock_a] + w_b * ann_returns[stock_b]
+        p_var = (
+            (w_a ** 2) * ann_cov.loc[stock_a, stock_a]
+            + (w_b ** 2) * ann_cov.loc[stock_b, stock_b]
+            + 2 * w_a * w_b * ann_cov.loc[stock_a, stock_b]
+        )
+        p_vol = math.sqrt(p_var)
+
+        ret_curve.append(p_ret)
+        vol_curve.append(p_vol)
+
+    curve_df = pd.DataFrame({
+        "Weight A (%)": weight_grid,
+        "Annualized Return": ret_curve,
+        "Annualized Volatility": vol_curve,
+    })
+
+    return (
+        corr_matrix,
+        selected_returns,
+        rolling_corr,
+        current_portfolio_return,
+        current_portfolio_vol,
+        curve_df,
+    )
+
+@st.cache_data(show_spinner="Cleaning downloaded price data...", ttl=3600)
+def clean_price_data(data_dict: dict):
+    prices = pd.concat(data_dict, axis=1)
+    prices.columns = prices.columns.get_level_values(0)
+
+    missing_pct = prices.isna().mean()
+    drop_cols = [col for col in prices.columns if missing_pct[col] > 0.05 and col != "^GSPC"]
+
+    if drop_cols:
+        prices = prices.drop(columns=drop_cols)
+
+    rows_before = len(prices)
+    prices = prices.dropna()
+    rows_after = len(prices)
+
+    return prices, drop_cols, rows_before, rows_after
+
 # -- Main logic -------------------------------------------
 if st.session_state.analysis_started and tickers:
     try:
@@ -167,29 +285,21 @@ if st.session_state.analysis_started and tickers:
             + ", ".join(failed_tickers)
         )
         st.warning(
-            "Yahoo Finance may be rate-limiting requests right now. "
-            "This can happen on Streamlit Cloud when many apps share the same outbound IP."
+            "Yahoo Finance may be rate-limiting requests right now."
         )
 
     if not data_dict:
         st.stop()
 
-    prices = pd.concat(data_dict, axis=1)
-    prices.columns = prices.columns.get_level_values(0)
+    # ✅ CLEAN DATA (cached)
+    prices, drop_cols, rows_before, rows_after = clean_price_data(data_dict)
 
-    missing_pct = prices.isna().mean()
-    drop_cols = [col for col in prices.columns if missing_pct[col] > 0.05 and col != "^GSPC"]
-
+    # ✅ NOW SAFE to use drop_cols
     if drop_cols:
         st.warning(
             "Dropped ticker(s) with more than 5% missing values: "
             + ", ".join(drop_cols)
         )
-        prices = prices.drop(columns=drop_cols)
-
-    rows_before = len(prices)
-    prices = prices.dropna()
-    rows_after = len(prices)
 
     if rows_after < rows_before:
         st.info("Data was truncated to the overlapping date range across tickers.")
@@ -201,7 +311,7 @@ if st.session_state.analysis_started and tickers:
 
     returns, stats_df, wealth_df = compute_price_return_analysis(prices, usable_tickers)
 
-
+    # ✅ ALL YOUR TABS MUST ALSO BE INSIDE THIS BLOCK
     tab1, tab2, tab3, tab4 = st.tabs(
         ["Price & Returns", "Risk & Distribution", "Correlation & Portfolio", "About"]
     )
@@ -214,6 +324,10 @@ if st.session_state.analysis_started and tickers:
             options=list(prices.columns),
             default=list(prices.columns)
         )
+
+        if not selected_series:
+            st.warning("Select at least one series to display price and wealth charts.")
+            st.stop()
 
         st.markdown("### Summary Statistics")
         st.dataframe(
@@ -277,6 +391,7 @@ if st.session_state.analysis_started and tickers:
             height=500
         )
         st.plotly_chart(wealth_fig, use_container_width=True)
+
     with tab2:
         st.subheader("Risk & Distribution Analysis")
 
@@ -304,7 +419,14 @@ if st.session_state.analysis_started and tickers:
             default=list(prices.columns)
         )   
 
-        rolling_vol, stock_returns, x_vals, pdf_vals, theoretical_q, sample_q, slope, intercept, jb_stat, jb_p = compute_risk_distribution_analysis(
+        if not vol_series:
+            st.warning("Select at least one series for the rolling volatility chart.")
+            st.stop()
+
+        if not vol_series:
+            st.warning("Select at least one series for the rolling volatility chart.")
+        else:
+            rolling_vol, stock_returns, x_vals, pdf_vals, theoretical_q, sample_q, slope, intercept, jb_stat, jb_p = compute_risk_distribution_analysis(
             returns, dist_stock, vol_window
         )
 
@@ -433,8 +555,160 @@ if st.session_state.analysis_started and tickers:
         st.plotly_chart(box_fig, use_container_width=True)
 
     with tab3:
-        st.subheader("Correlation & Portfolio")
-        st.info("This section will include the correlation heatmap, scatter plot, rolling correlation, and two-asset portfolio explorer.")
+        st.subheader("Correlation & Diversification Analysis")
+
+        corr_stock_a = st.selectbox(
+            "Select Stock A",
+            options=usable_tickers,
+            index=0,
+            key="corr_stock_a"
+        )
+
+        corr_stock_b_options = [t for t in usable_tickers if t != corr_stock_a]
+
+        if not corr_stock_b_options:
+            st.warning("Select at least two usable tickers for correlation analysis.")
+            st.stop()
+
+        corr_stock_b = st.selectbox(
+            "Select Stock B",
+            options=corr_stock_b_options,
+            index=0,
+            key="corr_stock_b"
+        )
+
+        corr_window = st.selectbox(
+            "Select rolling correlation window (days)",
+            options=[30, 60, 90],
+            index=0
+        )
+
+        weight_a_pct = st.slider(
+            f"Weight on {corr_stock_a} (%)",
+            min_value=0,
+            max_value=100,
+            value=50
+        )
+
+        (
+            corr_matrix,
+            pair_returns,
+            rolling_corr,
+            current_portfolio_return,
+            current_portfolio_vol,
+            curve_df,
+        ) = compute_correlation_portfolio_analysis(
+            returns,
+            corr_stock_a,
+            corr_stock_b,
+            corr_window,
+            weight_a_pct,
+        )
+
+        st.markdown("### Correlation Heatmap")
+        heatmap_fig = go.Figure(
+            data=go.Heatmap(
+                z=corr_matrix.values,
+                x=corr_matrix.columns,
+                y=corr_matrix.index,
+                zmid=0,
+                text=np.round(corr_matrix.values, 2),
+                texttemplate="%{text}",
+                textfont={"size": 12},
+                colorscale="RdBu"
+            )
+        )
+        heatmap_fig.update_layout(
+            title="Pairwise Correlation Matrix of Daily Returns",
+            xaxis_title="Ticker",
+            yaxis_title="Ticker",
+            template="plotly_white",
+            height=500
+        )
+        st.plotly_chart(heatmap_fig, use_container_width=True)
+
+        st.markdown(f"### Scatter Plot: {corr_stock_a} vs {corr_stock_b}")
+        scatter_fig = go.Figure()
+        scatter_fig.add_trace(
+            go.Scatter(
+                x=pair_returns[corr_stock_a],
+                y=pair_returns[corr_stock_b],
+                mode="markers",
+                name="Daily Returns"
+            )
+        )
+        scatter_fig.update_layout(
+            title=f"Daily Return Scatter Plot: {corr_stock_a} vs {corr_stock_b}",
+            xaxis_title=f"{corr_stock_a} Daily Return",
+            yaxis_title=f"{corr_stock_b} Daily Return",
+            template="plotly_white",
+            height=500
+        )
+        st.plotly_chart(scatter_fig, use_container_width=True)
+
+        st.markdown("### Rolling Correlation")
+        rolling_corr_fig = go.Figure()
+        rolling_corr_fig.add_trace(
+            go.Scatter(
+                x=rolling_corr.index,
+                y=rolling_corr,
+                mode="lines",
+                name="Rolling Correlation"
+            )
+        )
+        rolling_corr_fig.update_layout(
+            title=f"Rolling Correlation ({corr_window}-Day Window): {corr_stock_a} vs {corr_stock_b}",
+            xaxis_title="Date",
+            yaxis_title="Correlation",
+            template="plotly_white",
+            height=500
+        )
+        st.plotly_chart(rolling_corr_fig, use_container_width=True)
+
+        st.markdown("### Two-Asset Portfolio Explorer")
+
+        col1, col2 = st.columns(2)
+        col1.metric("Portfolio Annualized Return", f"{current_portfolio_return:.2%}")
+        col2.metric("Portfolio Annualized Volatility", f"{current_portfolio_vol:.2%}")
+
+        curve_fig = go.Figure()
+        curve_fig.add_trace(
+            go.Scatter(
+                x=curve_df["Weight A (%)"],
+                y=curve_df["Annualized Volatility"],
+                mode="lines",
+                name="Portfolio Volatility Curve"
+            )
+        )
+
+        current_vol = curve_df.loc[
+            curve_df["Weight A (%)"] == weight_a_pct,
+            "Annualized Volatility"
+        ].iloc[0]
+
+        curve_fig.add_trace(
+            go.Scatter(
+                x=[weight_a_pct],
+                y=[current_vol],
+                mode="markers",
+                name="Current Weight"
+            )
+        )
+
+        curve_fig.update_layout(
+            title=f"Two-Asset Portfolio Volatility: {corr_stock_a} / {corr_stock_b}",
+            xaxis_title=f"Weight on {corr_stock_a} (%)",
+            yaxis_title="Annualized Volatility",
+            template="plotly_white",
+            height=500
+        )
+        st.plotly_chart(curve_fig, use_container_width=True)
+
+        st.info(
+            "This chart demonstrates diversification: combining two stocks can create a portfolio "
+            "with lower volatility than either stock alone when their correlation is less than 1. "
+            "The diversification benefit is usually stronger when correlation is lower."
+        )
 
     with tab4:
         st.subheader("About / Methodology")
@@ -443,10 +717,13 @@ if st.session_state.analysis_started and tickers:
             This app compares multiple stocks using adjusted close prices from Yahoo Finance.
 
             **Key assumptions**
-            - Daily returns are simple arithmetic returns using `pct_change()`
-            - Annualized return uses 252 trading days
-            - Annualized volatility uses daily standard deviation times sqrt(252)
+            - Daily returns are simple arithmetic returns computed with `pct_change()`
+            - Annualized mean return uses 252 trading days
+            - Annualized volatility uses daily standard deviation times `sqrt(252)`
             - Benchmark: S&P 500 (`^GSPC`)
+            - Cumulative wealth uses `(1 + returns).cumprod()` starting from $10,000
+            - The equal-weight portfolio is the average of daily returns across selected stocks
+            - Jarque-Bera p-values below 0.05 suggest rejecting normality
             """
         )
 
