@@ -167,74 +167,74 @@ if run_analysis and tickers:
     with tab1:
         st.subheader("Price and Return Analysis")
 
-    selected_series = st.multiselect(
-        "Select stocks to show on charts",
-        options=list(prices.columns),
-        default=list(prices.columns)
-    )
-
-    st.markdown("### Summary Statistics")
-    st.dataframe(
-        stats_df.style.format({
-            "Annualized Mean Return": "{:.2%}",
-            "Annualized Volatility": "{:.2%}",
-            "Skewness": "{:.3f}",
-            "Kurtosis": "{:.3f}",
-            "Min Daily Return": "{:.2%}",
-            "Max Daily Return": "{:.2%}",
-        }),
-        use_container_width=True
-    )
-
-    st.markdown("### Adjusted Closing Prices")
-    price_fig = go.Figure()
-    for col in selected_series:
-        price_fig.add_trace(
-            go.Scatter(
-                x=prices.index,
-                y=prices[col],
-                mode="lines",
-                name=col
-            )
+        selected_series = st.multiselect(
+            "Select stocks to show on charts",
+            options=list(prices.columns),
+            default=list(prices.columns)
         )
 
-    price_fig.update_layout(
-        title="Adjusted Closing Prices",
-        xaxis_title="Date",
-        yaxis_title="Adjusted Close Price (USD)",
-        template="plotly_white",
-        height=500
-    )
-    st.plotly_chart(price_fig, use_container_width=True)
-
-    st.markdown("### Daily Returns")
-    st.dataframe(returns[selected_series].tail(), use_container_width=True)
-
-    st.markdown("### Cumulative Wealth Index ($10,000 Initial Investment)")
-    wealth_fig = go.Figure()
-    wealth_to_plot = [c for c in selected_series if c in wealth_df.columns]
-
-    if "Equal-Weight Portfolio" not in wealth_to_plot:
-        wealth_to_plot.append("Equal-Weight Portfolio")
-
-    for col in wealth_to_plot:
-        wealth_fig.add_trace(
-            go.Scatter(
-                x=wealth_df.index,
-                y=wealth_df[col],
-                mode="lines",
-                name=col
-            )
+        st.markdown("### Summary Statistics")
+        st.dataframe(
+            stats_df.style.format({
+                "Annualized Mean Return": "{:.2%}",
+                "Annualized Volatility": "{:.2%}",
+                "Skewness": "{:.3f}",
+                "Kurtosis": "{:.3f}",
+                "Min Daily Return": "{:.2%}",
+                "Max Daily Return": "{:.2%}",
+            }),
+            use_container_width=True
         )
 
-    wealth_fig.update_layout(
-        title="Growth of $10,000",
-        xaxis_title="Date",
-        yaxis_title="Portfolio Value ($)",
-        template="plotly_white",
-        height=500
-    )
-    st.plotly_chart(wealth_fig, use_container_width=True)
+        st.markdown("### Adjusted Closing Prices")
+        price_fig = go.Figure()
+        for col in selected_series:
+            price_fig.add_trace(
+                go.Scatter(
+                    x=prices.index,
+                    y=prices[col],
+                    mode="lines",
+                    name=col
+                )
+            )
+
+        price_fig.update_layout(
+            title="Adjusted Closing Prices",
+            xaxis_title="Date",
+            yaxis_title="Adjusted Close Price (USD)",
+            template="plotly_white",
+            height=500
+        )
+        st.plotly_chart(price_fig, use_container_width=True)
+
+        st.markdown("### Daily Returns")
+        st.dataframe(returns[selected_series].tail(), use_container_width=True)
+
+        st.markdown("### Cumulative Wealth Index ($10,000 Initial Investment)")
+        wealth_fig = go.Figure()
+
+        wealth_to_plot = [c for c in selected_series if c in wealth_df.columns]
+        if "Equal-Weight Portfolio" not in wealth_to_plot:
+            wealth_to_plot.append("Equal-Weight Portfolio")
+
+        for col in wealth_to_plot:
+            wealth_fig.add_trace(
+                go.Scatter(
+                    x=wealth_df.index,
+                    y=wealth_df[col],
+                    mode="lines",
+                    name=col
+                )
+            )
+
+        wealth_fig.update_layout(
+            title="Growth of $10,000",
+            xaxis_title="Date",
+            yaxis_title="Portfolio Value ($)",
+            template="plotly_white",
+            height=500
+        )
+        st.plotly_chart(wealth_fig, use_container_width=True)
     with tab2:
         st.subheader("Risk & Distribution")
         st.info("This section will include rolling volatility, histogram, Q-Q plot, Jarque-Bera test, and box plot.")
