@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import date, timedelta
 import math
+import time
 
 # -- Page configuration ----------------------------------
 # st.set_page_config must be the FIRST Streamlit command in the script.
@@ -36,6 +37,7 @@ if len(tickers) < 2 or len(tickers) > 5:
 default_start = date.today() - timedelta(days=365)
 start_date = st.sidebar.date_input("Start Date", value=default_start, min_value=date(1970, 1, 1))
 end_date = st.sidebar.date_input("End Date", value=date.today(), min_value=date(1970, 1, 1))
+run_analysis = st.sidebar.button("Run Analysis")
 
 # Validate that the date range makes sense
 if start_date >= end_date:
@@ -59,25 +61,37 @@ def load_data(tickers: list[str], start: date, end: date):
     failed = []
 
     for symbol in all_symbols:
-        try:
-            df = yf.download(
-                symbol,
-                start=start,
-                end=end,
-                progress=False,
-                auto_adjust=False
-            )
-            if df.empty or "Adj Close" not in df.columns:
-                failed.append(symbol)
-            else:
-                data[symbol] = df["Adj Close"]
-        except Exception:
+        success = False
+
+        for attempt in range(3):
+            try:
+                df = yf.download(
+                    symbol,
+                    start=start,
+                    end=end,
+                    progress=False,
+                    auto_adjust=False,
+                    threads=False
+                )
+
+                if not df.empty and "Adj Close" in df.columns:
+                    data[symbol] = df["Adj Close"]
+                    success = True
+                    time.sleep(1)
+                    break
+
+            except Exception:
+                pass
+
+            time.sleep(2 * (attempt + 1))
+
+        if not success:
             failed.append(symbol)
 
     return data, failed
 
 # -- Main logic -------------------------------------------
-if tickers:
+if run_analysis and tickers:
     try:
         data_dict, failed_tickers = load_data(tickers, start_date, end_date)
     except Exception as e:
@@ -202,4 +216,4 @@ if tickers:
         )
 
 else:
-    st.info("Enter 2 to 5 stock tickers in the sidebar to get started.")
+    st.info("Enter 2 to 5 stock tickers, choose dates, and click Run Analysis.")
