@@ -90,6 +90,28 @@ def load_data(tickers: list[str], start: date, end: date):
 
     return data, failed
 
+@st.cache_data(show_spinner="Calculating return analytics...", ttl=3600)
+def compute_price_return_analysis(prices: pd.DataFrame, user_tickers: list[str]):
+    returns = prices.pct_change().dropna()
+
+    stats = pd.DataFrame({
+        "Annualized Mean Return": returns.mean() * 252,
+        "Annualized Volatility": returns.std() * math.sqrt(252),
+        "Skewness": returns.skew(),
+        "Kurtosis": returns.kurtosis(),
+        "Min Daily Return": returns.min(),
+        "Max Daily Return": returns.max(),
+    })
+
+    selected_returns = returns[user_tickers]
+    equal_weight_return = selected_returns.mean(axis=1)
+    equal_weight_wealth = 10000 * (1 + equal_weight_return).cumprod()
+
+    wealth = 10000 * (1 + returns).cumprod()
+    wealth["Equal-Weight Portfolio"] = equal_weight_wealth
+
+    return returns, stats, wealth
+
 # -- Main logic -------------------------------------------
 if run_analysis and tickers:
     try:
@@ -132,67 +154,87 @@ if run_analysis and tickers:
         st.info("Data was truncated to the overlapping date range across tickers.")
 
     usable_tickers = [t for t in tickers if t in prices.columns]
+    returns, stats_df, wealth_df = compute_price_return_analysis(prices, usable_tickers)
     if len(usable_tickers) < 2:
         st.error("At least 2 valid stock tickers with sufficient data are required.")
         st.stop()
 
-    returns = prices.pct_change()
+
     tab1, tab2, tab3, tab4 = st.tabs(
         ["Price & Returns", "Risk & Distribution", "Correlation & Portfolio", "About"]
     )
 
     with tab1:
-        summary_rows = []
-        for symbol in usable_tickers:
-            latest_close = float(prices[symbol].iloc[-1])
-            total_return = float((prices[symbol].iloc[-1] / prices[symbol].iloc[0]) - 1)
-            volatility = float(returns[symbol].std())
-            ann_volatility = volatility * math.sqrt(252)
-            max_close = float(prices[symbol].max())
-            min_close = float(prices[symbol].min())
+        st.subheader("Price and Return Analysis")
 
-            summary_rows.append({
-                "Ticker": symbol,
-                "Latest Close": f"${latest_close:,.2f}",
-                "Total Return": f"{total_return:.2%}",
-                "Annualized Volatility": f"{ann_volatility:.2%}",
-                "Period High": f"${max_close:,.2f}",
-                "Period Low": f"${min_close:,.2f}",
-            })
+    selected_series = st.multiselect(
+        "Select stocks to show on charts",
+        options=list(prices.columns),
+        default=list(prices.columns)
+    )
 
-        summary_df = pd.DataFrame(summary_rows)
+    st.markdown("### Summary Statistics")
+    st.dataframe(
+        stats_df.style.format({
+            "Annualized Mean Return": "{:.2%}",
+            "Annualized Volatility": "{:.2%}",
+            "Skewness": "{:.3f}",
+            "Kurtosis": "{:.3f}",
+            "Min Daily Return": "{:.2%}",
+            "Max Daily Return": "{:.2%}",
+        }),
+        use_container_width=True
+    )
 
-        st.subheader("Key Metrics")
-        st.dataframe(summary_df, use_container_width=True)
-
-        selected_series = st.multiselect(
-            "Select stocks to display on the price chart",
-            options=list(prices.columns),
-            default=list(prices.columns)
-        )
-
-        st.subheader("Adjusted Closing Prices")
-
-        fig = go.Figure()
-        for col in selected_series:
-            fig.add_trace(
-                go.Scatter(
-                    x=prices.index,
-                    y=prices[col],
-                    mode="lines",
-                    name=col,
-                    line=dict(width=1.5)
-                )
+    st.markdown("### Adjusted Closing Prices")
+    price_fig = go.Figure()
+    for col in selected_series:
+        price_fig.add_trace(
+            go.Scatter(
+                x=prices.index,
+                y=prices[col],
+                mode="lines",
+                name=col
             )
-
-        fig.update_layout(
-            title="Adjusted Closing Prices",
-            yaxis_title="Price (USD)",
-            xaxis_title="Date",
-            template="plotly_white",
-            height=450
         )
-        st.plotly_chart(fig, use_container_width=True)
+
+    price_fig.update_layout(
+        title="Adjusted Closing Prices",
+        xaxis_title="Date",
+        yaxis_title="Adjusted Close Price (USD)",
+        template="plotly_white",
+        height=500
+    )
+    st.plotly_chart(price_fig, use_container_width=True)
+
+    st.markdown("### Daily Returns")
+    st.dataframe(returns[selected_series].tail(), use_container_width=True)
+
+    st.markdown("### Cumulative Wealth Index ($10,000 Initial Investment)")
+    wealth_fig = go.Figure()
+    wealth_to_plot = [c for c in selected_series if c in wealth_df.columns]
+
+    if "Equal-Weight Portfolio" not in wealth_to_plot:
+        wealth_to_plot.append("Equal-Weight Portfolio")
+
+    for col in wealth_to_plot:
+        wealth_fig.add_trace(
+            go.Scatter(
+                x=wealth_df.index,
+                y=wealth_df[col],
+                mode="lines",
+                name=col
+            )
+        )
+
+    wealth_fig.update_layout(
+        title="Growth of $10,000",
+        xaxis_title="Date",
+        yaxis_title="Portfolio Value ($)",
+        template="plotly_white",
+        height=500
+    )
+    st.plotly_chart(wealth_fig, use_container_width=True)
     with tab2:
         st.subheader("Risk & Distribution")
         st.info("This section will include rolling volatility, histogram, Q-Q plot, Jarque-Bera test, and box plot.")
