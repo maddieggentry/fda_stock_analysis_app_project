@@ -20,7 +20,17 @@ st.title("Stock Analysis Dashboard")
 # -- Sidebar: user inputs --------------------------------
 st.sidebar.header("Settings")
 
-ticker = st.sidebar.text_input("Stock Ticker", value="AAPL").upper().strip()
+ticker_text = st.sidebar.text_input(
+    "Enter 2 to 5 tickers (comma-separated)",
+    value="AAPL, MSFT"
+)
+
+tickers = [t.strip().upper() for t in ticker_text.split(",") if t.strip()]
+tickers = list(dict.fromkeys(tickers))  # remove duplicates, keep order
+
+if len(tickers) < 2 or len(tickers) > 5:
+    st.sidebar.error("Please enter between 2 and 5 ticker symbols.")
+    st.stop()
 
 # Default date range: one year back from today
 default_start = date.today() - timedelta(days=365)
@@ -32,75 +42,160 @@ if start_date >= end_date:
     st.sidebar.error("Start date must be before end date.")
     st.stop()
 
+if (end_date - start_date).days < 365:
+    st.sidebar.error("Please select a date range of at least 1 year.")
+    st.stop()
+
 # -- Data download ----------------------------------------
 # We wrap the download in st.cache_data so repeated runs with
 # the same inputs don't re-download every time. The ttl (time-to-live)
 # ensures the cache expires after one hour so data stays fresh.
 @st.cache_data(show_spinner="Fetching data...", ttl=3600)
-def load_data(ticker: str, start: date, end: date) -> pd.DataFrame:
-    """Download daily data from Yahoo Finance for a given date range."""
-    df = yf.download(ticker, start=start, end=end, progress=False)
-    return df
+def load_data(tickers: list[str], start: date, end: date):
+    benchmark = "^GSPC"
+    all_symbols = tickers + [benchmark]
+
+    data = {}
+    failed = []
+
+    for symbol in all_symbols:
+        try:
+            df = yf.download(
+                symbol,
+                start=start,
+                end=end,
+                progress=False,
+                auto_adjust=False
+            )
+            if df.empty or "Adj Close" not in df.columns:
+                failed.append(symbol)
+            else:
+                data[symbol] = df["Adj Close"]
+        except Exception:
+            failed.append(symbol)
+
+    return data, failed
 
 # -- Main logic -------------------------------------------
-if ticker:
+if tickers:
     try:
-        df = load_data(ticker, start_date, end_date)
+        data_dict, failed_tickers = load_data(tickers, start_date, end_date)
     except Exception as e:
         st.error(f"Failed to download data: {e}")
         st.stop()
 
-    if df.empty:
+    if failed_tickers:
         st.error(
-            f"No data found for **{ticker}**. "
-            "Check the ticker symbol and try again."
+            "These ticker(s) failed to download or had insufficient data: "
+            + ", ".join(failed_tickers)
         )
+
+    if not data_dict:
         st.stop()
 
-    # Flatten any multi-level columns that yfinance sometimes returns
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    prices = pd.concat(data_dict, axis=1)
+    prices.columns = prices.columns.get_level_values(0)
 
-    # -- Compute a derived column -------------------------
-    df["Daily Return"] = df["Close"].pct_change()
+    missing_pct = prices.isna().mean()
+    drop_cols = [col for col in prices.columns if missing_pct[col] > 0.05 and col != "^GSPC"]
 
-    # -- Key metrics --------------------------------------
-    latest_close = float(df["Close"].iloc[-1])
-    total_return = float((df["Close"].iloc[-1] / df["Close"].iloc[0]) - 1)
-    volatility = float(df["Daily Return"].std())
-    ann_volatility = volatility * math.sqrt(252)  # Annualize: daily sigma * sqrt(trading days)
-    max_close = float(df["Close"].max())
-    min_close = float(df["Close"].min())
-
-    st.subheader(f"{ticker} — Key Metrics")
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Latest Close", f"${latest_close:,.2f}")
-    col2.metric("1-Year Return", f"{total_return:.2%}")
-    col3.metric("Annualized Volatility (sigma)", f"{ann_volatility:.2%}")
-
-    col4, col5, _ = st.columns(3)
-    col4.metric("Period High", f"${max_close:,.2f}")
-    col5.metric("Period Low", f"${min_close:,.2f}")
-
-    st.divider()
-
-    # -- Price chart --------------------------------------
-    st.subheader("Closing Price")
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=df.index, y=df["Close"],
-            mode="lines", name="Close Price",
-            line=dict(width=1.5)
+    if drop_cols:
+        st.warning(
+            "Dropped ticker(s) with more than 5% missing values: "
+            + ", ".join(drop_cols)
         )
+        prices = prices.drop(columns=drop_cols)
+
+    rows_before = len(prices)
+    prices = prices.dropna()
+    rows_after = len(prices)
+
+    if rows_after < rows_before:
+        st.info("Data was truncated to the overlapping date range across tickers.")
+
+    usable_tickers = [t for t in tickers if t in prices.columns]
+    if len(usable_tickers) < 2:
+        st.error("At least 2 valid stock tickers with sufficient data are required.")
+        st.stop()
+
+    returns = prices.pct_change()
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Price & Returns", "Risk & Distribution", "Correlation & Portfolio", "About"]
     )
-    fig.update_layout(
-        yaxis_title="Price (USD)", xaxis_title="Date",
-        template="plotly_white", height=450
-    )
-    st.plotly_chart(fig, width="stretch")
+
+    with tab1:
+        summary_rows = []
+        for symbol in usable_tickers:
+            latest_close = float(prices[symbol].iloc[-1])
+            total_return = float((prices[symbol].iloc[-1] / prices[symbol].iloc[0]) - 1)
+            volatility = float(returns[symbol].std())
+            ann_volatility = volatility * math.sqrt(252)
+            max_close = float(prices[symbol].max())
+            min_close = float(prices[symbol].min())
+
+            summary_rows.append({
+                "Ticker": symbol,
+                "Latest Close": f"${latest_close:,.2f}",
+                "Total Return": f"{total_return:.2%}",
+                "Annualized Volatility": f"{ann_volatility:.2%}",
+                "Period High": f"${max_close:,.2f}",
+                "Period Low": f"${min_close:,.2f}",
+            })
+
+        summary_df = pd.DataFrame(summary_rows)
+
+        st.subheader("Key Metrics")
+        st.dataframe(summary_df, use_container_width=True)
+
+        selected_series = st.multiselect(
+            "Select stocks to display on the price chart",
+            options=list(prices.columns),
+            default=list(prices.columns)
+        )
+
+        st.subheader("Adjusted Closing Prices")
+
+        fig = go.Figure()
+        for col in selected_series:
+            fig.add_trace(
+                go.Scatter(
+                    x=prices.index,
+                    y=prices[col],
+                    mode="lines",
+                    name=col,
+                    line=dict(width=1.5)
+                )
+            )
+
+        fig.update_layout(
+            title="Adjusted Closing Prices",
+            yaxis_title="Price (USD)",
+            xaxis_title="Date",
+            template="plotly_white",
+            height=450
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    with tab2:
+        st.subheader("Risk & Distribution")
+        st.info("This section will include rolling volatility, histogram, Q-Q plot, Jarque-Bera test, and box plot.")
+
+    with tab3:
+        st.subheader("Correlation & Portfolio")
+        st.info("This section will include the correlation heatmap, scatter plot, rolling correlation, and two-asset portfolio explorer.")
+
+    with tab4:
+        st.subheader("About / Methodology")
+        st.markdown(
+            """
+            This app compares multiple stocks using adjusted close prices from Yahoo Finance.
+
+            **Key assumptions**
+            - Daily returns are simple arithmetic returns using `pct_change()`
+            - Annualized return uses 252 trading days
+            - Annualized volatility uses daily standard deviation times sqrt(252)
+            - Benchmark: S&P 500 (`^GSPC`)
+            """
+        )
 
 else:
-    st.info("Enter a stock ticker in the sidebar to get started.")
+    st.info("Enter 2 to 5 stock tickers in the sidebar to get started.")
